@@ -218,7 +218,12 @@ impl OpenAIAdapter {
 		let url = AdapterDispatcher::get_service_url(&model, service_type, endpoint)?;
 
 		// -- headers
-		let headers = Headers::from(("Authorization".to_string(), format!("Bearer {api_key}")));
+		let mut headers = Headers::from(("Authorization".to_string(), format!("Bearer {api_key}")));
+
+		// -- extra headers
+		if let Some(extra_headers) = options_set.extra_headers() {
+			headers.merge_with(extra_headers);
+		}
 
 		let stream = matches!(service_type, ServiceType::ChatStream);
 
@@ -367,7 +372,7 @@ impl OpenAIAdapter {
 	/// Takes the genai ChatMessages and builds the OpenAIChatRequestParts
 	/// - `genai::ChatRequest.system`, if present, is added as the first message with role 'system'.
 	/// - All messages get added with the corresponding roles (tools are not supported for now)
-	fn into_openai_request_parts(_model_iden: &ModelIden, chat_req: ChatRequest) -> Result<OpenAIRequestParts> {
+	fn into_openai_request_parts(model_iden: &ModelIden, chat_req: ChatRequest) -> Result<OpenAIRequestParts> {
 		let mut messages: Vec<Value> = Vec::new();
 
 		// -- Process the system
@@ -511,6 +516,7 @@ impl OpenAIAdapter {
 		}
 
 		// -- Process the tools
+		let is_openai = matches!(model_iden.adapter_kind, AdapterKind::OpenAI | AdapterKind::OpenAIResp);
 		let tools = chat_req.tools.map(|tools| {
 			tools
 				.into_iter()
@@ -518,16 +524,21 @@ impl OpenAIAdapter {
 					// TODO: Need to handle the error correctly
 					// TODO: Needs to have a custom serializer (tool should not have to match to a provider)
 					// NOTE: Right now, low probability, so, we just return null if cannot convert to value.
+					let mut function = serde_json::json!({
+						"name": tool.name,
+						"description": tool.description,
+						"parameters": tool.schema,
+					});
+					// Only emit `strict` for OpenAI adapters; other OpenAI-compatible
+					// APIs (DeepSeek, Groq, Together, etc.) reject unknown fields.
+					if is_openai {
+						// TODO: If we need to support `strict: true` we need to add additionalProperties: false into the schema
+						//       above (like structured output)
+						function["strict"] = serde_json::Value::Bool(false);
+					}
 					json!({
 						"type": "function",
-						"function": {
-							"name": tool.name,
-							"description": tool.description,
-							"parameters": tool.schema,
-							// TODO: If we need to support `strict: true` we need to add additionalProperties: false into the schema
-							//       above (like structured output)
-							"strict": false,
-						}
+						"function": function,
 					})
 				})
 				.collect::<Vec<Value>>()
